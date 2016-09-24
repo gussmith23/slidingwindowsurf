@@ -1,19 +1,12 @@
 #include "opencv2/opencv.hpp"
 #include "opencv2/features2d/features2d.hpp"
 #include "opencv2/xfeatures2d/nonfree.hpp"
-
+#include <thread>
 
 using namespace cv;
 using namespace std;
 using namespace cv::xfeatures2d;
 
-
-/// <summary>
-/// Return a confidence score for a set of match distances.
-/// </summary>
-/// <param name="Distances">The match distances.</param>
-/// <param name="Mask"></param>
-/// <returns></returns>
 float computeScore(const vector<DMatch> matches)
 {
 	float score = 0.0f;
@@ -25,22 +18,16 @@ float computeScore(const vector<DMatch> matches)
 	return final_score;
 }
 
-void surf(Mat modelImage, Mat observedImage, Point2f& centerOfObject, double& confidence)
+void find(Mat modelImage, vector<KeyPoint> modelKeyPoints, Mat modelDescriptors,
+			Mat observedImage, 
+			Ptr<DescriptorExtractor> descriptorExtractor,
+			Ptr<DescriptorMatcher> matcher,
+			Point2f& centerOfObject, double& confidence)
 {
-	Ptr<DescriptorExtractor> descriptorExtractor = SURF::create(1000, 4, 3, false, true);
-
-	vector<KeyPoint> modelKeyPoints;
-	Mat modelDescriptors;
 	vector<KeyPoint> observedKeyPoints;
 	Mat observedDescriptors;
-	Mat indices;
-
-//	surfExtractor->detectAndCompute(modelImage, Mat(), modelKeyPoints, modelDescriptors);
-	//surfExtractor->detectAndCompute(observedImage, Mat(), observedKeyPoints, observedDescriptors);
-	descriptorExtractor->detectAndCompute(modelImage, Mat(), modelKeyPoints, modelDescriptors);
 	descriptorExtractor->detectAndCompute(observedImage, Mat(), observedKeyPoints, observedDescriptors);
-
-	Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce");
+		
 	std::vector< DMatch > matches;
 	matcher->match(modelDescriptors, observedDescriptors, matches);
 	double max_dist = 0; double min_dist = 100;
@@ -52,7 +39,6 @@ void surf(Mat modelImage, Mat observedImage, Point2f& centerOfObject, double& co
 		if (dist > max_dist) max_dist = dist;
 	}
 
-	//-- Draw only "good" matches (i.e. whose distance is less than 3*min_dist )
 	std::vector< DMatch > good_matches;
 	for (int i = 0; i < modelDescriptors.rows; i++)
 	{
@@ -62,6 +48,7 @@ void surf(Mat modelImage, Mat observedImage, Point2f& centerOfObject, double& co
 		}
 	}
 
+	/*
 	//-- Localize the object
 	std::vector<Point2f> obj;
 	std::vector<Point2f> scene;
@@ -77,7 +64,8 @@ void surf(Mat modelImage, Mat observedImage, Point2f& centerOfObject, double& co
 	std::vector<Point2f> observedCenter(1);
 	//perspectiveTransform(modelCenter, observedCenter, H);
 
-	centerOfObject = observedCenter[0];
+	centerOfObject = observedCenter[0];*/
+	
 	confidence = computeScore(good_matches);
 }
 
@@ -85,6 +73,15 @@ Rect findBestROI(Mat sceneImage, Mat modelImage, Size patchSize, Point2f& center
 	Point currentLoc = Point(0, 0);
 	tuple<Rect, double> bestROI = tuple<Rect, double>(Rect(), 0.0f);
 	Size stepSize = Size((int)((float)patchSize.width / 2.0), (int)((float)patchSize.height / 2.0));
+
+	vector<tuple<Rect, double>> roiScores;
+	vector<thread> threads;
+
+	Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce");
+	Ptr<DescriptorExtractor> extractor = SURF::create();
+
+	vector<KeyPoint> modelKeyPoints; Mat modelDescriptors;
+	extractor->detectAndCompute(modelImage, Mat(), modelKeyPoints, modelDescriptors);
 
 	while (currentLoc.y + patchSize.height < sceneImage.rows)
 	{
@@ -96,6 +93,16 @@ Rect findBestROI(Mat sceneImage, Mat modelImage, Size patchSize, Point2f& center
 			if (currentLoc.x + patchSize.width > sceneImage.cols)
 				currentLoc.x = sceneImage.cols - patchSize.width;
 
+			threads.push_back(thread([&] {
+				double confidence;
+				Rect thisROI = Rect(currentLoc, patchSize);
+				Mat roi = sceneImage(thisROI);
+				Point2f tmpCenter;
+				find(modelImage,modelKeyPoints,modelDescriptors, roi, extractor, matcher, tmpCenter, confidence);
+				roiScores.push_back(tuple<Rect, double>(thisROI, confidence));
+			}));
+
+			/*
 			double confidence;
 			Rect thisROI = Rect(currentLoc, patchSize);
 			Mat roi = sceneImage(thisROI);
@@ -105,12 +112,29 @@ Rect findBestROI(Mat sceneImage, Mat modelImage, Size patchSize, Point2f& center
 			{
 				bestROI = tuple<Rect, double>(thisROI, confidence);
 				centerRelativeToPatch = tmpCenter;
-			}
+			}*/
+
 			currentLoc.x += stepSize.width;
 		}
 		currentLoc.x = 0;
 		currentLoc.y += stepSize.height;
 	}
 
-	return get<0>(bestROI);
+	for (auto t = threads.begin(); t != threads.end(); ++t)
+		t->join();
+
+	vector<tuple<Rect, double>>::iterator result = max_element(roiScores.begin(), roiScores.end(), 
+		[](tuple<Rect, double> A, tuple<Rect, double> B) {
+			return get<1>(A) < get<1>(B);
+		});
+
+	Mat withboxes(sceneImage);
+	for_each(roiScores.begin(), roiScores.end(), [&](tuple<Rect, double> t){
+		double confidence = get<1>(t);
+		putText(withboxes, to_string(confidence), get<0>(t).tl(), FONT_HERSHEY_COMPLEX, 2.5, Scalar(255, 0, 255), 2);
+	});
+	resize(withboxes, withboxes, Size(), .25, .25);
+	imshow("hi",withboxes); waitKey();
+
+	return get<0>(*result);
 }
