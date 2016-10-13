@@ -3,19 +3,29 @@
 #include "opencv2/xfeatures2d/nonfree.hpp"
 #include <thread>
 
+#define SERIAL 0
+
 using namespace cv;
 using namespace std;
 using namespace cv::xfeatures2d;
 
-float computeScore(const vector<DMatch> matches)
+float computeScore(const vector<DMatch> matchVector, int numMaxMatches)
 {
 	float score = 0.0f;
+	int matches = 0;
 
-	for (auto it = matches.begin(); it != matches.end(); ++it)
-		score += it->distance;
+	for (auto match = matchVector.begin(); match != matchVector.end(); match++)
+	{
+		matches++;
+		score += 1 - match->distance;
+	}
 
-	float final_score = 1.0f - (((float)matches.size() - score) / (float)matches.size());
-	return final_score;
+	int numPoints = matchVector.size();
+	float precision = score / (float)matches;
+	float recall = (float)matches / (float)numMaxMatches;
+	float fscore = 2 * ((precision * recall) / (precision + recall));
+
+	return fscore;
 }
 
 void find(Mat modelImage, vector<KeyPoint> modelKeyPoints, Mat modelDescriptors,
@@ -48,7 +58,7 @@ void find(Mat modelImage, vector<KeyPoint> modelKeyPoints, Mat modelDescriptors,
 		}
 	}
 
-	/*
+	
 	//-- Localize the object
 	std::vector<Point2f> obj;
 	std::vector<Point2f> scene;
@@ -64,9 +74,13 @@ void find(Mat modelImage, vector<KeyPoint> modelKeyPoints, Mat modelDescriptors,
 	std::vector<Point2f> observedCenter(1);
 	//perspectiveTransform(modelCenter, observedCenter, H);
 
-	centerOfObject = observedCenter[0];*/
+	centerOfObject = observedCenter[0];
 	
-	confidence = computeScore(good_matches);
+	confidence = computeScore(good_matches, modelKeyPoints.size());
+
+	Mat matchImg;
+	drawMatches(modelImage, modelKeyPoints, observedImage, observedKeyPoints, good_matches, matchImg);
+	//imshow("matches", matchImg); //waitKey(2000);
 }
 
 Rect findBestROI(Mat sceneImage, Mat modelImage, Size patchSize, Point2f& centerRelativeToPatch) {
@@ -78,7 +92,8 @@ Rect findBestROI(Mat sceneImage, Mat modelImage, Size patchSize, Point2f& center
 	vector<thread> threads;
 
 	Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce");
-	Ptr<DescriptorExtractor> extractor = SURF::create();
+	//Ptr<DescriptorExtractor> extractor = SURF::create();
+	Ptr<DescriptorExtractor> extractor = ORB::create();
 
 	vector<KeyPoint> modelKeyPoints; Mat modelDescriptors;
 	extractor->detectAndCompute(modelImage, Mat(), modelKeyPoints, modelDescriptors);
@@ -93,26 +108,23 @@ Rect findBestROI(Mat sceneImage, Mat modelImage, Size patchSize, Point2f& center
 			if (currentLoc.x + patchSize.width > sceneImage.cols)
 				currentLoc.x = sceneImage.cols - patchSize.width;
 
-			threads.push_back(thread([&] {
+			thread t = thread([&] {
 				double confidence;
 				Rect thisROI = Rect(currentLoc, patchSize);
 				Mat roi = sceneImage(thisROI);
 				Point2f tmpCenter;
-				find(modelImage,modelKeyPoints,modelDescriptors, roi, extractor, matcher, tmpCenter, confidence);
+				find(modelImage, modelKeyPoints, modelDescriptors, roi, extractor, matcher, tmpCenter, confidence);
 				roiScores.push_back(tuple<Rect, double>(thisROI, confidence));
-			}));
+			});
 
-			/*
-			double confidence;
-			Rect thisROI = Rect(currentLoc, patchSize);
-			Mat roi = sceneImage(thisROI);
-			Point2f tmpCenter;
-			surf(modelImage, roi, tmpCenter, confidence);
-			if (confidence > get<1>(bestROI))
+
+			if (SERIAL) {
+				t.join();
+			}
+			else
 			{
-				bestROI = tuple<Rect, double>(thisROI, confidence);
-				centerRelativeToPatch = tmpCenter;
-			}*/
+				threads.push_back(move(t));
+			}
 
 			currentLoc.x += stepSize.width;
 		}
@@ -120,21 +132,14 @@ Rect findBestROI(Mat sceneImage, Mat modelImage, Size patchSize, Point2f& center
 		currentLoc.y += stepSize.height;
 	}
 
-	for (auto t = threads.begin(); t != threads.end(); ++t)
-		t->join();
+	if (!SERIAL)
+		for (auto t = threads.begin(); t != threads.end(); ++t)
+			t->join();
 
 	vector<tuple<Rect, double>>::iterator result = max_element(roiScores.begin(), roiScores.end(), 
 		[](tuple<Rect, double> A, tuple<Rect, double> B) {
 			return get<1>(A) < get<1>(B);
 		});
-
-	Mat withboxes(sceneImage);
-	for_each(roiScores.begin(), roiScores.end(), [&](tuple<Rect, double> t){
-		double confidence = get<1>(t);
-		putText(withboxes, to_string(confidence), get<0>(t).tl(), FONT_HERSHEY_COMPLEX, 2.5, Scalar(255, 0, 255), 2);
-	});
-	resize(withboxes, withboxes, Size(), .25, .25);
-	imshow("hi",withboxes); waitKey();
 
 	return get<0>(*result);
 }
